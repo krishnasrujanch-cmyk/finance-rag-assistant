@@ -1,0 +1,159 @@
+============================================================
+FINANCE RAG - Sample Conversation Log
+============================================================
+Date: 2025-05-17
+Model: GPT-4o-mini | Embeddings: text-embedding-3-small | VectorDB: ChromaDB
+============================================================
+
+--- Session Start ---
+
+Vector store loaded with 72 chunks.
+Initializing RAG chain...
+
+------------------------------------------------------------
+Finance Assistant is ready!
+------------------------------------------------------------
+
+You: What is a mutual fund?
+
+Assistant: A mutual fund is a pooled investment vehicle managed by a professional
+fund manager. It collects money from multiple investors and invests it in a
+diversified portfolio of stocks, bonds, or other securities. Mutual funds offer
+investors the benefits of diversification, professional management, and liquidity.
+Each investor owns shares in the mutual fund, which represent a portion of the
+funds holdings.
+
+Important Disclaimer: Mutual fund investments are subject to market risks. Please
+read all scheme-related documents carefully before investing.
+  Sources: investment_basics_faq.txt, mutual_fund_guide.txt
+
+------------------------------------------------------------
+
+You: What are the different types of mutual funds?
+
+Assistant: Based on the Mutual Fund Investment Guide, there are several types of
+mutual funds:
+
+1. Equity Mutual Funds - Invest primarily in stocks. Includes Large-Cap Funds
+   (top 100 companies), Mid-Cap Funds (101st to 250th), Small-Cap Funds (251st
+   and below), Multi-Cap Funds, and Flexi-Cap Funds.
+
+2. Debt Mutual Funds - Invest in fixed-income securities like government bonds,
+   corporate bonds, and treasury bills. Types include Liquid Funds, Short Duration
+   Funds, Corporate Bond Funds, Gilt Funds, and Dynamic Bond Funds.
+
+3. Hybrid Mutual Funds - Invest in a mix of equity and debt. Includes Conservative
+   Hybrid (10-25% equity), Balanced Advantage, and Aggressive Hybrid (65-80% equity).
+
+4. Index Funds - Passively managed funds that replicate a specific market index like
+   NIFTY 50 or Sensex with low expense ratios (0.05% to 0.50%).
+
+5. ELSS (Equity Linked Savings Scheme) - Tax-saving funds with Section 80C deduction
+   up to Rs. 1,50,000 per year and a 3-year lock-in period.
+  Sources: mutual_fund_guide.txt
+
+------------------------------------------------------------
+
+You: What about the tax-saving ones? What is the lock-in period?
+
+Assistant: Based on the documents, ELSS (Equity Linked Savings Scheme) has a mandatory
+lock-in period of 3 years, which is the shortest among all Section 80C investments.
+ELSS offers tax deduction under Section 80C of the Income Tax Act up to Rs. 1,50,000
+per year. For comparison, Tax-Saving Fixed Deposits have a 5-year lock-in, and PPF
+has a 15-year lock-in period.
+  Sources: mutual_fund_guide.txt, fixed_deposits_savings.txt
+
+------------------------------------------------------------
+
+You: How do I start investing in stocks?
+
+Assistant: According to the Stock Market Basics guide, to invest in the Indian stock
+market you need the following:
+
+1. Demat Account - A dematerialized account that holds shares in electronic form.
+   It is mandatory for trading. Opened with Depository Participants registered with
+   NSDL or CDSL.
+
+2. Trading Account - Linked to your demat account, allows you to place buy and sell
+   orders on the stock exchange.
+
+3. Bank Account - A savings account linked to your trading and demat account for
+   fund transfers.
+
+4. PAN Card - Mandatory for all stock market transactions and KYC verification.
+
+5. KYC Verification - Including identity proof, address proof, and income proof.
+
+The account opening process has been simplified with most brokers offering online
+opening through e-KYC using Aadhaar-based verification, which can be completed
+within 15-30 minutes.
+
+Important Note: Stock market investments are subject to market risks. Investors
+should conduct thorough research or consult a SEBI-registered investment advisor.
+  Sources: stock_market_basics.txt
+
+------------------------------------------------------------
+
+You: What is the 50-30-20 rule?
+
+Assistant: The 50-30-20 Rule is a popular budgeting guideline described in the
+Personal Finance Planning Guide:
+
+- 50% of income for Needs: Essential expenses such as rent, groceries, utilities,
+  EMIs, and insurance premiums.
+
+- 30% of income for Wants: Non-essential expenses such as dining out, entertainment,
+  vacations, and shopping.
+
+- 20% of income for Savings and Investments: Emergency fund contributions, mutual
+  fund SIPs, PPF, NPS, and other investments.
+  Sources: personal_finance_planning.txt
+
+------------------------------------------------------------
+
+You: What is the current price of Bitcoin?
+
+Assistant: I dont have enough information in the provided documents to answer this
+question. The documents cover topics like investments, mutual funds, stock markets,
+personal finance planning, and savings instruments in India, but do not contain
+information about cryptocurrency prices.
+
+------------------------------------------------------------
+
+You: Tell me about PPF.
+
+Assistant: Based on the documents, the Public Provident Fund (PPF) is a long-term
+savings scheme backed by the Government of India. Here are the key features:
+
+- Lock-in Period: 15 years, extendable in blocks of 5 years.
+- Current Interest Rate: Approximately 7.1% per annum, compounded annually.
+  The rate is revised quarterly by the government.
+- Minimum Deposit: Rs. 500 per year.
+- Maximum Deposit: Rs. 1,50,000 per year.
+- Tax Treatment: EEE (Exempt-Exempt-Exempt) status - contributions qualify for
+  Section 80C deduction, interest earned is tax-free, and maturity proceeds are
+  tax-free.
+- Partial Withdrawal: Allowed from the 7th financial year onwards, up to 50% of
+  the balance at the end of the 4th preceding year.
+- Loan Against PPF: Available from the 3rd year to the 6th year, up to 25% of
+  the balance at the end of the 2nd preceding year.
+
+PPF is one of the safest investment options available in India.
+  Sources: fixed_deposits_savings.txt, personal_finance_planning.txt
+
+------------------------------------------------------------
+
+You: Who is the CEO of Apple?
+
+Assistant: I dont have enough information in the provided documents to answer this
+question. The documents focus on finance topics such as investments, mutual funds,
+stock market basics, personal finance planning, and savings instruments. They do
+not contain information about specific company executives.
+
+------------------------------------------------------------
+
+You: quit
+
+Thank you for using Finance RAG Assistant. Goodbye!
+
+--- Session End ---
