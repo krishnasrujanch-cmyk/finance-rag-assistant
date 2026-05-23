@@ -17,7 +17,7 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -120,7 +120,8 @@ def create_rag_chain(vector_store: Chroma) -> ConversationalRetrievalChain:
     llm = ChatOpenAI(
         model=LLM_MODEL,
         temperature=TEMPERATURE,
-        openai_api_key=os.getenv("OPENAI_API_KEY")
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        openai_api_base=os.getenv("OPENAI_BASE_URL")
     )
 
     # Create retriever from vector store

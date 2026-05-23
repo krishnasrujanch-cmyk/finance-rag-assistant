@@ -1,15 +1,20 @@
 """
-app.py - Streamlit UI for the Finance RAG Chatbot (Bonus Feature)
+app.py - Streamlit UI for the Finance RAG Chatbot
 
-This module provides a web-based interface for the Finance RAG chatbot
-using Streamlit. It includes:
-1. Chat interface with conversation history
-2. Source document citation display
-3. Sidebar with information and controls
+Works both locally and on Streamlit Community Cloud.
+- Locally: reads OPENAI_API_KEY from .env file
+- Cloud:   reads OPENAI_API_KEY from Streamlit Secrets (Settings → Secrets)
+
+If the ChromaDB vector store does not exist, it auto-runs ingestion on startup.
 """
 
 import os
 import sys
+
+# Fix for Streamlit Cloud: sqlite3 version issue with ChromaDB
+__import__('pysqlite3')
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -17,19 +22,45 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-CHROMA_PERSIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DOCUMENTS_DIR = os.path.join(BASE_DIR, "documents")
+CHROMA_PERSIST_DIR = os.path.join(BASE_DIR, "chroma_db")
 EMBEDDING_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
 TOP_K = 4
 TEMPERATURE = 0.2
 
+
 # ---------------------------------------------------------------------------
-# Prompts (same as chatbot.py)
+# API Key Helper — works with .env (local) and st.secrets (cloud)
+# ---------------------------------------------------------------------------
+def get_api_key() -> str:
+    """Retrieve OpenAI API key from environment or Streamlit secrets."""
+    # First try .env file (local development)
+    load_dotenv()
+    key = os.getenv("OPENAI_API_KEY")
+    if key and key != "your-openai-api-key-here":
+        return key
+
+    # Then try Streamlit secrets (cloud deployment)
+    try:
+        key = st.secrets["OPENAI_API_KEY"]
+        if key:
+            os.environ["OPENAI_API_KEY"] = key  # set for LangChain
+            return key
+    except (KeyError, FileNotFoundError):
+        pass
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Prompts
 # ---------------------------------------------------------------------------
 QA_PROMPT_TEMPLATE = """You are a helpful Finance Domain Support Assistant. Your job is to
 help users with questions about investments, mutual funds, stock markets, personal finance,
@@ -66,22 +97,71 @@ Follow-up Question: {question}
 Standalone Question:"""
 
 
-@st.cache_resource
-def initialize_chain():
-    """Initialize and cache the RAG chain."""
-    load_dotenv()
+# ---------------------------------------------------------------------------
+# Auto-Ingestion — runs once if chroma_db/ doesn't exist
+# ---------------------------------------------------------------------------
+def auto_ingest(api_key: str):
+    """Run document ingestion to create the vector store."""
+    from langchain_community.document_loaders import TextLoader, PyPDFLoader
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        st.error("OPENAI_API_KEY not found. Please set it in your .env file.")
+    st.info("🔄 First-time setup: Ingesting documents and creating vector store...")
+
+    # Load documents
+    all_documents = []
+    for filename in sorted(os.listdir(DOCUMENTS_DIR)):
+        filepath = os.path.join(DOCUMENTS_DIR, filename)
+        if filename.endswith(".txt"):
+            loader = TextLoader(filepath, encoding="utf-8")
+            docs = loader.load()
+            for doc in docs:
+                doc.metadata["source"] = filename
+            all_documents.extend(docs)
+        elif filename.endswith(".pdf"):
+            loader = PyPDFLoader(filepath)
+            docs = loader.load()
+            for doc in docs:
+                doc.metadata["source"] = filename
+            all_documents.extend(docs)
+
+    if not all_documents:
+        st.error("No documents found in the 'documents/' folder.")
         st.stop()
 
-    # Load vector store
-    if not os.path.exists(CHROMA_PERSIST_DIR):
-        st.error("Vector store not found. Please run `python ingest.py` first.")
-        st.stop()
+    # Split into chunks
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len,
+        separators=["\n\n", "\n", ". ", " ", ""]
+    )
+    chunks = text_splitter.split_documents(all_documents)
 
+    # Create vector store
     embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=api_key)
+
+    if os.path.exists(CHROMA_PERSIST_DIR):
+        import shutil
+        shutil.rmtree(CHROMA_PERSIST_DIR)
+
+    Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=CHROMA_PERSIST_DIR,
+        collection_name="finance_docs"
+    )
+
+    st.success(f"✅ Ingestion complete! Loaded {len(all_documents)} documents → {len(chunks)} chunks.")
+
+
+# ---------------------------------------------------------------------------
+# Initialize RAG Chain
+# ---------------------------------------------------------------------------
+@st.cache_resource
+def initialize_chain(_api_key: str):
+    """Initialize and cache the RAG chain. _api_key is prefixed with _ to skip hashing."""
+
+    embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=_api_key)
 
     vector_store = Chroma(
         persist_directory=CHROMA_PERSIST_DIR,
@@ -89,14 +169,13 @@ def initialize_chain():
         collection_name="finance_docs"
     )
 
-    llm = ChatOpenAI(model=LLM_MODEL, temperature=TEMPERATURE, openai_api_key=api_key)
+    llm = ChatOpenAI(model=LLM_MODEL, temperature=TEMPERATURE, openai_api_key=_api_key)
 
     retriever = vector_store.as_retriever(
         search_type="similarity",
         search_kwargs={"k": TOP_K}
     )
 
-    # QA prompt — only {context} and {question}
     qa_prompt = PromptTemplate(
         input_variables=["context", "question"],
         template=QA_PROMPT_TEMPLATE
@@ -126,36 +205,39 @@ def initialize_chain():
     return chain
 
 
+# ---------------------------------------------------------------------------
+# Main Streamlit App
+# ---------------------------------------------------------------------------
 def main():
-    """Main Streamlit application."""
-
-    # Page configuration
     st.set_page_config(
         page_title="Finance RAG Assistant",
         page_icon="💰",
         layout="wide"
     )
 
-    # Sidebar
+    # ---- Sidebar ----
     with st.sidebar:
         st.title("💰 Finance RAG Assistant")
         st.markdown("---")
         st.markdown("""
-        **Domain:** Finance
-        **Documents Covered:**
-        - Investment Basics FAQ
-        - Mutual Fund Guide
-        - Stock Market Basics
-        - Personal Finance Planning
-        - Fixed Deposits & Savings
+**Domain:** Finance
+
+**Documents Covered:**
+- 📄 Investment Basics FAQ
+- 📄 Mutual Fund Guide
+- 📄 Stock Market Basics
+- 📄 Personal Finance Planning
+- 📄 Fixed Deposits & Savings
         """)
         st.markdown("---")
         st.markdown("""
-        **How to use:**
-        1. Type your finance question below
-        2. The assistant retrieves relevant info from documents
-        3. Get grounded answers with source citations
-        4. Ask follow-up questions for deeper understanding
+**Sample questions to try:**
+- What is a mutual fund?
+- How do I start investing in stocks?
+- What is the 50-30-20 budgeting rule?
+- Tell me about PPF and its tax benefits
+- What are the types of fixed deposits?
+- What is the difference between active and passive investing?
         """)
         st.markdown("---")
 
@@ -166,20 +248,41 @@ def main():
             st.rerun()
 
         st.markdown("---")
-        st.caption("Built with LangChain, OpenAI, and ChromaDB")
+        st.caption("Built with LangChain · OpenAI · ChromaDB · Streamlit")
 
-    # Main chat area
+    # ---- Main Area ----
     st.title("💰 Finance Domain Support Assistant")
     st.caption("Ask questions about investments, mutual funds, stocks, tax planning, and more!")
 
-    # Initialize chat history in session state
+    # Get API key
+    api_key = get_api_key()
+    if not api_key:
+        st.warning("⚠️ OpenAI API key not found.")
+        api_key_input = st.text_input(
+            "Enter your OpenAI API Key:",
+            type="password",
+            placeholder="sk-..."
+        )
+        if api_key_input:
+            os.environ["OPENAI_API_KEY"] = api_key_input
+            api_key = api_key_input
+            st.rerun()
+        else:
+            st.info("💡 You can also set it via `.env` file locally or in Streamlit Cloud → Settings → Secrets.")
+            st.stop()
+
+    # Auto-ingest if vector store doesn't exist
+    if not os.path.exists(CHROMA_PERSIST_DIR):
+        auto_ingest(api_key)
+
+    # Initialize chain
+    chain = initialize_chain(api_key)
+
+    # Chat history
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Initialize the chain
-    chain = initialize_chain()
-
-    # Display existing chat messages
+    # Display existing messages
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -189,12 +292,12 @@ def main():
 
     # Chat input
     if user_input := st.chat_input("Ask a finance question..."):
-        # Display user message
+        # Show user message
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Get response
+        # Generate response
         with st.chat_message("assistant"):
             with st.spinner("Searching documents and generating answer..."):
                 try:
@@ -204,7 +307,7 @@ def main():
 
                     st.markdown(answer)
 
-                    # Format and display sources
+                    # Format and show sources
                     sources_text = ""
                     if source_docs:
                         sources = set()
@@ -218,11 +321,15 @@ def main():
                             st.markdown(sources_text)
                             st.markdown("---")
                             for i, doc in enumerate(source_docs):
-                                st.markdown(f"**Chunk {i+1}** (from `{doc.metadata.get('source', 'Unknown')}`):")
-                                st.text(doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content)
+                                st.markdown(
+                                    f"**Chunk {i+1}** (from `{doc.metadata.get('source', 'Unknown')}`):"
+                                )
+                                preview = doc.page_content[:500]
+                                if len(doc.page_content) > 500:
+                                    preview += "..."
+                                st.text(preview)
                                 st.markdown("---")
 
-                    # Save to session state
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": answer,

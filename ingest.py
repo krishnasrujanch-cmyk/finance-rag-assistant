@@ -13,7 +13,7 @@ import sys
 from dotenv import load_dotenv
 
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, DirectoryLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 
@@ -117,7 +117,7 @@ def create_vector_store(chunks: list) -> Chroma:
     embeddings = OpenAIEmbeddings(
         model=EMBEDDING_MODEL,
         openai_api_key=os.getenv("OPENAI_API_KEY"),
-          openai_api_base=os.getenv("OPENAI_BASE_URL")
+        openai_api_base=os.getenv("OPENAI_BASE_URL")
     )
     
     # Remove existing ChromaDB directory if it exists (fresh ingestion)
