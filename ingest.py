@@ -149,6 +149,7 @@ def run_ingestion():
     print("FINANCE RAG - Document Ingestion Pipeline")
     print("=" * 60)
     
+    
     # Load environment variables
     load_dotenv()
     
