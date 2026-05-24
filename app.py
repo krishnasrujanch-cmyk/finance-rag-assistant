@@ -1,21 +1,19 @@
 """
-app.py - Streamlit UI for the Finance RAG Chatbot
-
-Works on Streamlit Community Cloud and locally.
-Uses FAISS vector store (no ChromaDB / SQLite dependency issues).
-Auto-ingests documents on first run if faiss_index/ doesn't exist.
+app.py - Streamlit Finance RAG Assistant
+Uses LCEL (LangChain Expression Language) - compatible with Python 3.14.
+No ChromaDB. No ConversationalRetrievalChain. Works on Streamlit Cloud.
 """
 
 import os
-import sys
 import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -29,48 +27,29 @@ TOP_K = 4
 TEMPERATURE = 0.2
 
 # ---------------------------------------------------------------------------
-# Prompts
+# System Prompt
 # ---------------------------------------------------------------------------
-QA_PROMPT_TEMPLATE = """You are a helpful Finance Domain Support Assistant. Your job is to
-help users with questions about investments, mutual funds, stock markets, personal finance,
-savings instruments, tax planning, and related financial topics.
+SYSTEM_PROMPT = """You are a helpful Finance Domain Support Assistant. Help users with
+questions about investments, mutual funds, stock markets, personal finance, savings
+instruments, tax planning, and related financial topics.
 
 INSTRUCTIONS:
-1. Use the context provided below to answer the user's question accurately.
-2. If the user sends a greeting or a general request (e.g. "help me with mutual funds"),
-   welcome them warmly and provide a useful overview using the information in the context.
-3. If the context contains relevant information, give a clear, detailed, and well-structured
-   answer. Do NOT refuse to answer when the context has relevant content.
-4. Only say "I don't have enough information in the provided documents to answer this
-   question." when the context truly contains NO relevant information at all.
-5. Mention which document or section your answer is based on when possible.
-6. Include relevant disclaimers from the source documents when applicable.
+1. Answer using the context below. If the user sends a greeting or general request,
+   welcome them and give a helpful overview from the context.
+2. Give clear, detailed answers when the context is relevant.
+3. Only say "I don't have enough information in the provided documents to answer this."
+   when the context has NO relevant information at all.
+4. Cite the source document when possible.
+5. Include relevant disclaimers from source documents when applicable.
 
 Context from retrieved documents:
-{context}
-
-User's Question: {question}
-
-Helpful Answer:"""
-
-
-CONDENSE_PROMPT_TEMPLATE = """Given the following conversation history and a new follow-up
-question, rephrase the follow-up question to be a standalone question that captures the
-full intent. If the question is already standalone or is a greeting, return it as-is.
-
-Chat History:
-{chat_history}
-
-Follow-up Question: {question}
-
-Standalone Question:"""
+{context}"""
 
 
 # ---------------------------------------------------------------------------
-# API Key Helper
+# Helpers
 # ---------------------------------------------------------------------------
 def get_api_key() -> str:
-    """Get OpenAI API key from .env (local) or st.secrets (cloud)."""
     load_dotenv()
     key = os.getenv("OPENAI_API_KEY", "")
     if key and key != "your-openai-api-key-here":
@@ -85,16 +64,27 @@ def get_api_key() -> str:
     return ""
 
 
+def format_docs(docs) -> str:
+    parts = []
+    for doc in docs:
+        source = doc.metadata.get("source", "unknown")
+        parts.append(f"[Source: {source}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(parts)
+
+
+def get_sources(docs) -> str:
+    sources = sorted({d.metadata.get("source", "Unknown") for d in docs})
+    return "**Referenced Documents:**\n" + "\n".join(f"- {s}" for s in sources)
+
+
 # ---------------------------------------------------------------------------
 # Auto-Ingestion
 # ---------------------------------------------------------------------------
 def auto_ingest(api_key: str):
-    """Run document ingestion to build the FAISS index."""
     from langchain_community.document_loaders import TextLoader, PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    with st.status("⚙️ First-time setup: Building vector index from documents...", expanded=True) as status:
-        # Load docs
+    with st.status("⚙️ First-time setup: Building vector index...", expanded=True) as status:
         st.write("📂 Loading documents...")
         all_docs = []
         for filename in sorted(os.listdir(DOCUMENTS_DIR)):
@@ -113,10 +103,9 @@ def auto_ingest(api_key: str):
                 all_docs.extend(docs)
 
         if not all_docs:
-            st.error("No documents found in the 'documents/' folder.")
+            st.error("No documents found in 'documents/' folder.")
             st.stop()
 
-        # Split
         st.write(f"✂️ Splitting {len(all_docs)} documents into chunks...")
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000, chunk_overlap=200,
@@ -124,76 +113,53 @@ def auto_ingest(api_key: str):
         )
         chunks = splitter.split_documents(all_docs)
 
-        # Embed and save
         st.write(f"🔢 Generating embeddings for {len(chunks)} chunks...")
         embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=api_key)
         vector_store = FAISS.from_documents(chunks, embeddings)
         vector_store.save_local(FAISS_INDEX_DIR)
 
-        status.update(label=f"✅ Index built: {len(all_docs)} docs → {len(chunks)} chunks", state="complete")
+        status.update(
+            label=f"✅ Ready! {len(all_docs)} docs → {len(chunks)} chunks indexed.",
+            state="complete"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Initialize RAG Chain
+# Initialize chain (cached)
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def initialize_chain(_api_key: str):
-    """Load FAISS index and create the RAG chain (cached)."""
     embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=_api_key)
-
     vector_store = FAISS.load_local(
-        FAISS_INDEX_DIR,
-        embeddings,
-        allow_dangerous_deserialization=True
+        FAISS_INDEX_DIR, embeddings, allow_dangerous_deserialization=True
     )
-
+    retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": TOP_K})
     llm = ChatOpenAI(model=LLM_MODEL, temperature=TEMPERATURE, openai_api_key=_api_key)
 
-    retriever = vector_store.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": TOP_K}
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_PROMPT),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}"),
+    ])
+
+    chain = (
+        RunnablePassthrough.assign(
+            context=lambda x: format_docs(retriever.invoke(x["question"]))
+        )
+        | prompt
+        | llm
+        | StrOutputParser()
     )
 
-    qa_prompt = PromptTemplate(
-        input_variables=["context", "question"],
-        template=QA_PROMPT_TEMPLATE
-    )
-
-    condense_question_prompt = PromptTemplate(
-        input_variables=["chat_history", "question"],
-        template=CONDENSE_PROMPT_TEMPLATE
-    )
-
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key="answer"
-    )
-
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=retriever,
-        memory=memory,
-        combine_docs_chain_kwargs={"prompt": qa_prompt},
-        condense_question_prompt=condense_question_prompt,
-        return_source_documents=True,
-        verbose=False
-    )
-
-    return chain
+    return chain, retriever
 
 
 # ---------------------------------------------------------------------------
 # Main App
 # ---------------------------------------------------------------------------
 def main():
-    st.set_page_config(
-        page_title="Finance RAG Assistant",
-        page_icon="💰",
-        layout="wide"
-    )
+    st.set_page_config(page_title="Finance RAG Assistant", page_icon="💰", layout="wide")
 
-    # Sidebar
     with st.sidebar:
         st.title("💰 Finance RAG Assistant")
         st.markdown("---")
@@ -215,17 +181,17 @@ def main():
 - What is the 50-30-20 budgeting rule?
 - Tell me about PPF and tax benefits
 - Types of fixed deposits?
-- Difference between active and passive investing?
+- Active vs passive investing?
         """)
         st.markdown("---")
-        if st.button("🗑️ Clear Chat History"):
+        if st.button("🗑️ Clear Chat"):
             st.session_state.messages = []
+            st.session_state.chat_history = []
             st.cache_resource.clear()
             st.rerun()
         st.markdown("---")
         st.caption("Built with LangChain · OpenAI · FAISS · Streamlit")
 
-    # Main
     st.title("💰 Finance Domain Support Assistant")
     st.caption("Ask questions about investments, mutual funds, stocks, tax planning, and more!")
 
@@ -239,19 +205,21 @@ def main():
             api_key = api_key_input
             st.rerun()
         else:
-            st.info("Set it in `.env` locally, or in Streamlit Cloud → Settings → Secrets as `OPENAI_API_KEY`.")
+            st.info("Set it in `.env` locally, or Streamlit Cloud → Settings → Secrets as `OPENAI_API_KEY`.")
             st.stop()
 
-    # Auto-ingest if needed
+    # Auto-ingest on first run
     if not os.path.exists(FAISS_INDEX_DIR):
         auto_ingest(api_key)
 
-    # Load chain
-    chain = initialize_chain(api_key)
+    # Initialize chain
+    chain, retriever = initialize_chain(api_key)
 
-    # Chat state
+    # Session state
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
     # Display history
     for msg in st.session_state.messages:
@@ -261,7 +229,7 @@ def main():
                 with st.expander("📄 Source Documents"):
                     st.markdown(msg["sources"])
 
-    # Input
+    # Chat input
     if user_input := st.chat_input("Ask a finance question..."):
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
@@ -270,20 +238,25 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("Searching documents..."):
                 try:
-                    result = chain.invoke({"question": user_input})
-                    answer = result.get("answer", "Error generating response.")
-                    source_docs = result.get("source_documents", [])
+                    # Get retrieved docs for source display
+                    retrieved_docs = retriever.invoke(user_input)
+
+                    # Run chain
+                    answer = chain.invoke({
+                        "question": user_input,
+                        "chat_history": st.session_state.chat_history
+                    })
 
                     st.markdown(answer)
 
+                    # Show sources
                     sources_text = ""
-                    if source_docs:
-                        sources = sorted({d.metadata.get("source", "Unknown") for d in source_docs})
-                        sources_text = "**Referenced Documents:**\n" + "\n".join(f"- {s}" for s in sources)
+                    if retrieved_docs:
+                        sources_text = get_sources(retrieved_docs)
                         with st.expander("📄 Source Documents"):
                             st.markdown(sources_text)
                             st.markdown("---")
-                            for i, doc in enumerate(source_docs):
+                            for i, doc in enumerate(retrieved_docs):
                                 st.markdown(f"**Chunk {i+1}** — `{doc.metadata.get('source', 'Unknown')}`")
                                 preview = doc.page_content[:500]
                                 if len(doc.page_content) > 500:
@@ -291,6 +264,9 @@ def main():
                                 st.text(preview)
                                 st.markdown("---")
 
+                    # Update history
+                    st.session_state.chat_history.append(HumanMessage(content=user_input))
+                    st.session_state.chat_history.append(AIMessage(content=answer))
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": answer,
