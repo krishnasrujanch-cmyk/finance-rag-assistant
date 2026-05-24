@@ -1,25 +1,18 @@
 """
 app.py - Streamlit UI for the Finance RAG Chatbot
 
-Works both locally and on Streamlit Community Cloud.
-- Locally: reads OPENAI_API_KEY from .env file
-- Cloud:   reads OPENAI_API_KEY from Streamlit Secrets (Settings → Secrets)
-
-If the ChromaDB vector store does not exist, it auto-runs ingestion on startup.
+Works on Streamlit Community Cloud and locally.
+Uses FAISS vector store (no ChromaDB / SQLite dependency issues).
+Auto-ingests documents on first run if faiss_index/ doesn't exist.
 """
 
 import os
 import sys
-
-# Fix for Streamlit Cloud: sqlite3 version issue with ChromaDB
-__import__('pysqlite3')
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-
 import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain_core.prompts import PromptTemplate
@@ -29,35 +22,11 @@ from langchain_core.prompts import PromptTemplate
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCUMENTS_DIR = os.path.join(BASE_DIR, "documents")
-CHROMA_PERSIST_DIR = os.path.join(BASE_DIR, "chroma_db")
+FAISS_INDEX_DIR = os.path.join(BASE_DIR, "faiss_index")
 EMBEDDING_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
 TOP_K = 4
 TEMPERATURE = 0.2
-
-
-# ---------------------------------------------------------------------------
-# API Key Helper — works with .env (local) and st.secrets (cloud)
-# ---------------------------------------------------------------------------
-def get_api_key() -> str:
-    """Retrieve OpenAI API key from environment or Streamlit secrets."""
-    # First try .env file (local development)
-    load_dotenv()
-    key = os.getenv("OPENAI_API_KEY")
-    if key and key != "your-openai-api-key-here":
-        return key
-
-    # Then try Streamlit secrets (cloud deployment)
-    try:
-        key = st.secrets["OPENAI_API_KEY"]
-        if key:
-            os.environ["OPENAI_API_KEY"] = key  # set for LangChain
-            return key
-    except (KeyError, FileNotFoundError):
-        pass
-
-    return ""
-
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -98,60 +67,70 @@ Standalone Question:"""
 
 
 # ---------------------------------------------------------------------------
-# Auto-Ingestion — runs once if chroma_db/ doesn't exist
+# API Key Helper
+# ---------------------------------------------------------------------------
+def get_api_key() -> str:
+    """Get OpenAI API key from .env (local) or st.secrets (cloud)."""
+    load_dotenv()
+    key = os.getenv("OPENAI_API_KEY", "")
+    if key and key != "your-openai-api-key-here":
+        return key
+    try:
+        key = st.secrets.get("OPENAI_API_KEY", "")
+        if key:
+            os.environ["OPENAI_API_KEY"] = key
+            return key
+    except Exception:
+        pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Auto-Ingestion
 # ---------------------------------------------------------------------------
 def auto_ingest(api_key: str):
-    """Run document ingestion to create the vector store."""
+    """Run document ingestion to build the FAISS index."""
     from langchain_community.document_loaders import TextLoader, PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    st.info("🔄 First-time setup: Ingesting documents and creating vector store...")
+    with st.status("⚙️ First-time setup: Building vector index from documents...", expanded=True) as status:
+        # Load docs
+        st.write("📂 Loading documents...")
+        all_docs = []
+        for filename in sorted(os.listdir(DOCUMENTS_DIR)):
+            filepath = os.path.join(DOCUMENTS_DIR, filename)
+            if filename.endswith(".txt"):
+                loader = TextLoader(filepath, encoding="utf-8")
+                docs = loader.load()
+                for d in docs:
+                    d.metadata["source"] = filename
+                all_docs.extend(docs)
+            elif filename.endswith(".pdf"):
+                loader = PyPDFLoader(filepath)
+                docs = loader.load()
+                for d in docs:
+                    d.metadata["source"] = filename
+                all_docs.extend(docs)
 
-    # Load documents
-    all_documents = []
-    for filename in sorted(os.listdir(DOCUMENTS_DIR)):
-        filepath = os.path.join(DOCUMENTS_DIR, filename)
-        if filename.endswith(".txt"):
-            loader = TextLoader(filepath, encoding="utf-8")
-            docs = loader.load()
-            for doc in docs:
-                doc.metadata["source"] = filename
-            all_documents.extend(docs)
-        elif filename.endswith(".pdf"):
-            loader = PyPDFLoader(filepath)
-            docs = loader.load()
-            for doc in docs:
-                doc.metadata["source"] = filename
-            all_documents.extend(docs)
+        if not all_docs:
+            st.error("No documents found in the 'documents/' folder.")
+            st.stop()
 
-    if not all_documents:
-        st.error("No documents found in the 'documents/' folder.")
-        st.stop()
+        # Split
+        st.write(f"✂️ Splitting {len(all_docs)} documents into chunks...")
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000, chunk_overlap=200,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+        chunks = splitter.split_documents(all_docs)
 
-    # Split into chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len,
-        separators=["\n\n", "\n", ". ", " ", ""]
-    )
-    chunks = text_splitter.split_documents(all_documents)
+        # Embed and save
+        st.write(f"🔢 Generating embeddings for {len(chunks)} chunks...")
+        embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=api_key)
+        vector_store = FAISS.from_documents(chunks, embeddings)
+        vector_store.save_local(FAISS_INDEX_DIR)
 
-    # Create vector store
-    embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=api_key)
-
-    if os.path.exists(CHROMA_PERSIST_DIR):
-        import shutil
-        shutil.rmtree(CHROMA_PERSIST_DIR)
-
-    Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=CHROMA_PERSIST_DIR,
-        collection_name="finance_docs"
-    )
-
-    st.success(f"✅ Ingestion complete! Loaded {len(all_documents)} documents → {len(chunks)} chunks.")
+        status.update(label=f"✅ Index built: {len(all_docs)} docs → {len(chunks)} chunks", state="complete")
 
 
 # ---------------------------------------------------------------------------
@@ -159,14 +138,13 @@ def auto_ingest(api_key: str):
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def initialize_chain(_api_key: str):
-    """Initialize and cache the RAG chain. _api_key is prefixed with _ to skip hashing."""
-
+    """Load FAISS index and create the RAG chain (cached)."""
     embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=_api_key)
 
-    vector_store = Chroma(
-        persist_directory=CHROMA_PERSIST_DIR,
-        embedding_function=embeddings,
-        collection_name="finance_docs"
+    vector_store = FAISS.load_local(
+        FAISS_INDEX_DIR,
+        embeddings,
+        allow_dangerous_deserialization=True
     )
 
     llm = ChatOpenAI(model=LLM_MODEL, temperature=TEMPERATURE, openai_api_key=_api_key)
@@ -206,7 +184,7 @@ def initialize_chain(_api_key: str):
 
 
 # ---------------------------------------------------------------------------
-# Main Streamlit App
+# Main App
 # ---------------------------------------------------------------------------
 def main():
     st.set_page_config(
@@ -215,7 +193,7 @@ def main():
         layout="wide"
     )
 
-    # ---- Sidebar ----
+    # Sidebar
     with st.sidebar:
         st.title("💰 Finance RAG Assistant")
         st.markdown("---")
@@ -231,99 +209,82 @@ def main():
         """)
         st.markdown("---")
         st.markdown("""
-**Sample questions to try:**
+**Try asking:**
 - What is a mutual fund?
 - How do I start investing in stocks?
 - What is the 50-30-20 budgeting rule?
-- Tell me about PPF and its tax benefits
-- What are the types of fixed deposits?
-- What is the difference between active and passive investing?
+- Tell me about PPF and tax benefits
+- Types of fixed deposits?
+- Difference between active and passive investing?
         """)
         st.markdown("---")
-
         if st.button("🗑️ Clear Chat History"):
             st.session_state.messages = []
-            st.session_state.pop("chain", None)
             st.cache_resource.clear()
             st.rerun()
-
         st.markdown("---")
-        st.caption("Built with LangChain · OpenAI · ChromaDB · Streamlit")
+        st.caption("Built with LangChain · OpenAI · FAISS · Streamlit")
 
-    # ---- Main Area ----
+    # Main
     st.title("💰 Finance Domain Support Assistant")
     st.caption("Ask questions about investments, mutual funds, stocks, tax planning, and more!")
 
-    # Get API key
+    # API Key
     api_key = get_api_key()
     if not api_key:
         st.warning("⚠️ OpenAI API key not found.")
-        api_key_input = st.text_input(
-            "Enter your OpenAI API Key:",
-            type="password",
-            placeholder="sk-..."
-        )
+        api_key_input = st.text_input("Enter your OpenAI API Key:", type="password", placeholder="sk-...")
         if api_key_input:
             os.environ["OPENAI_API_KEY"] = api_key_input
             api_key = api_key_input
             st.rerun()
         else:
-            st.info("💡 You can also set it via `.env` file locally or in Streamlit Cloud → Settings → Secrets.")
+            st.info("Set it in `.env` locally, or in Streamlit Cloud → Settings → Secrets as `OPENAI_API_KEY`.")
             st.stop()
 
-    # Auto-ingest if vector store doesn't exist
-    if not os.path.exists(CHROMA_PERSIST_DIR):
+    # Auto-ingest if needed
+    if not os.path.exists(FAISS_INDEX_DIR):
         auto_ingest(api_key)
 
-    # Initialize chain
+    # Load chain
     chain = initialize_chain(api_key)
 
-    # Chat history
+    # Chat state
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Display existing messages
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if message.get("sources"):
+    # Display history
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("sources"):
                 with st.expander("📄 Source Documents"):
-                    st.markdown(message["sources"])
+                    st.markdown(msg["sources"])
 
-    # Chat input
+    # Input
     if user_input := st.chat_input("Ask a finance question..."):
-        # Show user message
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Generate response
         with st.chat_message("assistant"):
-            with st.spinner("Searching documents and generating answer..."):
+            with st.spinner("Searching documents..."):
                 try:
                     result = chain.invoke({"question": user_input})
-                    answer = result.get("answer", "I encountered an error.")
+                    answer = result.get("answer", "Error generating response.")
                     source_docs = result.get("source_documents", [])
 
                     st.markdown(answer)
 
-                    # Format and show sources
                     sources_text = ""
                     if source_docs:
-                        sources = set()
-                        for doc in source_docs:
-                            src = doc.metadata.get("source", "Unknown")
-                            sources.add(src)
-                        sources_text = "**Referenced Documents:**\n" + "\n".join(
-                            [f"- {s}" for s in sorted(sources)]
-                        )
+                        sources = sorted({d.metadata.get("source", "Unknown") for d in source_docs})
+                        sources_text = "**Referenced Documents:**\n" + "\n".join(f"- {s}" for s in sources)
                         with st.expander("📄 Source Documents"):
                             st.markdown(sources_text)
                             st.markdown("---")
                             for i, doc in enumerate(source_docs):
-                                st.markdown(
-                                    f"**Chunk {i+1}** (from `{doc.metadata.get('source', 'Unknown')}`):"
-                                )
+                                st.markdown(f"**Chunk {i+1}** — `{doc.metadata.get('source', 'Unknown')}`")
                                 preview = doc.page_content[:500]
                                 if len(doc.page_content) > 500:
                                     preview += "..."
@@ -337,12 +298,9 @@ def main():
                     })
 
                 except Exception as e:
-                    error_msg = f"An error occurred: {str(e)}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": error_msg
-                    })
+                    err = f"Error: {str(e)}"
+                    st.error(err)
+                    st.session_state.messages.append({"role": "assistant", "content": err})
 
 
 if __name__ == "__main__":
